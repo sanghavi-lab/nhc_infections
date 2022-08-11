@@ -1,0 +1,116 @@
+## this code merge snf UTI claims with MDS,
+## select MDS assessment with the snf stay covered by the claim
+## and aggregate the UTI information on all MDS assessments during the stay
+import pandas as pd
+import dask.dataframe as dd
+import dask
+import numpy as np
+
+pd.set_option('display.max_columns', 500)
+from dask.distributed import Client
+client = Client("10.50.86.251:56590")
+
+def assign_end_date(row):
+    ## assign either the discharge date or the care through date as the end date of a snf stay
+    row['end_date'] = row['DSCHRG_DT']
+
+    if pd.isnull(row['DSCHRG_DT']):
+        row['end_date'] = row['CVRD_LVL_CARE_THRU_DT']
+
+    return row
+
+mdsPath = '/gpfs/data/sanghavi-lab/DESTROY/MDS/cross_walked/xwalk_mds_unique_new/{}/'
+inputPath = '/gpfs/data/cms-share/duas/55378/Zoey/gardner/data/medpar/infection/constructed_data2/MBSF/'
+writePath = '/gpfs/data/cms-share/duas/55378/Zoey/gardner/data/merge_output/infection/medpar_mds/SMDS/'
+analysisPath = '/gpfs/data/cms-share/duas/55378/Zoey/gardner/data/merge_output/infection/test/'
+
+years = range(2011, 2018)
+claims_type = ["primary", "second"]
+outcome = ["UTI", "PNEU"]
+
+for year in years:
+
+    ## define MDS items to use
+    infection_cols = ['I2000_PNEUMO_CD']
+    other_cols = ['MDS_ASMT_ID', 'TRGT_DT', 'STATE_CD', 'FAC_PRVDR_INTRNL_ID', 'A0310E_FIRST_SINCE_ADMSN_CD',
+                  'A0310F_ENTRY_DSCHRG_CD', 'A1600_ENTRY_DT', 'A1700_ENTRY_TYPE_CD',
+                  'A1900_ADMSN_DT', 'A2000_DSCHRG_DT', 'A2100_DSCHRG_STUS_CD']
+    ## read in mds
+    mds = dd.read_parquet(mdsPath.format(year))
+    # ## exclude mds with missing BENE_ID
+    # mds = mds[~mds.BENE_ID.isna()]
+    ## turn all columns to upper case
+    cols = [col.upper() for col in mds.columns]
+    mds.columns = cols
+    ## replace special characters
+    mds = mds.replace({'^': np.NaN, '-': 'not_applicable', '': np.NaN})
+    ## select columns to use
+    mds_use = mds[other_cols + infection_cols]
+    ## change data type
+    mds_use = mds_use.astype({'A2000_DSCHRG_DT': 'datetime64[ns]',
+                              'A1600_ENTRY_DT': 'string',
+                              'TRGT_DT': 'string'})
+    ## change date columns to datetime format
+    mds_use['A1600_ENTRY_DT'] = dd.to_datetime(mds_use['A1600_ENTRY_DT'], infer_datetime_format=True)
+    mds_use['TRGT_DT'] = dd.to_datetime(mds_use['TRGT_DT'], infer_datetime_format=True)
+    ## only keep MDS with eligible pneumonia items to merge with SNF claims
+    mds_use = mds_use[mds_use['I2000_PNEUMO_CD']!='not_applicable']
+
+    del mds
+    for ctype in claims_type:
+        snf = dd.read_parquet(inputPath + 'SNF{0}PNEU_MBSF/{1}/'.format(
+            ctype, year))
+        print('the number of pneu claims is')
+        print(snf.shape[0].compute()) #69121
+
+        snf = snf.astype({'ADMSN_DT': 'datetime64[ns]',
+                          'DSCHRG_DT': 'datetime64[ns]',
+                          'CVRD_LVL_CARE_THRU_DT': 'datetime64[ns]'})
+        snf = snf.reset_index()
+        ## merge mds with snf
+        merge_mds = snf.merge(mds_use, left_index=True, right_index=True, how="left")
+        merge_mds = merge_mds.map_partitions(lambda ddf: ddf.apply(assign_end_date, axis=1))
+
+        merge_mds = merge_mds.astype({'end_date': 'datetime64[ns]',
+                                      'I2000_PNEUMO_CD': 'float'})
+        ## calculate the number of merged SNF PU claims without an assigned end date
+        print('the number of claims without an assigned end date is')
+        print(merge_mds[merge_mds.end_date.isna()].MEDPAR_ID.unique().size.compute())
+
+        ## select mds merged within the stay of snf claims
+        snf_mds_within = merge_mds[(merge_mds['TRGT_DT'] >= merge_mds['ADMSN_DT']) &
+                                   (merge_mds['TRGT_DT'] <= merge_mds['end_date'])]
+        ## remove entry/death record (has no pressure ulcer item in mds)
+        snf_mds_within = snf_mds_within[~snf_mds_within.A0310F_ENTRY_DSCHRG_CD.isin([1, 12, "1", "12", "01"])]
+
+        ## remove mds if it is a discharge assessment and its target date is on the day of SNF admission date
+        ## because in this case I would assume the discharge assessment is from last nursing home from which the resident is discharged
+        snf_mds_within_no_entry = snf_mds_within[~((snf_mds_within.A0310F_ENTRY_DSCHRG_CD.isin([10, 11, "10", "11"])) & (snf_mds_within.TRGT_DT == snf_mds_within.ADMSN_DT))]
+
+        ## calculate the number of SNF claims that has mds from multiple NHs within the stay
+        wstay_nh = snf_mds_within_no_entry.groupby('MEDPAR_ID')['FAC_PRVDR_INTRNL_ID'].nunique().reset_index()
+        wstay_nh_multiple = wstay_nh[wstay_nh['FAC_PRVDR_INTRNL_ID'] > 1]
+
+        ## remoeve SNF claims matched with mds from multiple NHs
+        ## ensure that all SNF claims are merged with only one nursing home with reporting responsibility,
+        ## i.e. the same nursing home that submits the MedPAR claim
+        snf_mds_within_no_entry = snf_mds_within_no_entry[~snf_mds_within_no_entry.MEDPAR_ID.isin(list(wstay_nh_multiple.MEDPAR_ID))]
+
+        ## create indicators to suggest if the first assessment are within 7 days of admission or discharge date
+        ## because pneumonia item on MDS has a 7-day look-back period
+        snf_mds_within_no_entry['within_7_admission'] = (snf_mds_within_no_entry['TRGT_DT'] - snf_mds_within_no_entry['ADMSN_DT']).dt.days <= 7
+        snf_mds_within_no_entry['days_dischrg'] = (snf_mds_within_no_entry['end_date'] - snf_mds_within_no_entry['TRGT_DT']).dt.days
+
+
+        report = snf_mds_within_no_entry.groupby('MEDPAR_ID')[['I2000_PNEUMO_CD', 'within_7_admission', 'days_dischrg']].max().reset_index()
+        snf_mds_within_no_entry = snf_mds_within_no_entry.drop(columns=['I2000_PNEUMO_CD', 'within_7_admission', 'days_dischrg'])
+        snf_mds_unique = snf_mds_within_no_entry.drop_duplicates(subset='MEDPAR_ID')
+
+        snf_mds_unique = snf_mds_unique.merge(report, on='MEDPAR_ID')
+
+        snf_mds_unique.repartition(npartitions=20).to_parquet(
+            writePath + '{0}PNEU/{1}'.format(ctype, year)
+        )
+
+
+
