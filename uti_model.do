@@ -1,15 +1,12 @@
-local indir "//prfs.cri.uchicago.edu/cms-share/duas/55378/Zoey/gardner/data/merge_output/infection/medpar_mds/FINAL/"
+local indir "//prfs.cri.uchicago.edu/cms-share/duas/55378/Zoey/gardner/data/merge_output/infection/medpar_mds/FINAL/new/"
 
 *log using `"`logdir'/Exhibit4.log"', text replace
 
 cd "`indir'"
 
 *load analysis dataset
-import delimited using primaryOnlyUTI, clear
+import delimited using primaryUTI, clear
 
-*this line of code is only for pneumonia; 72 is porte rico; not occured in other health outcomes
-drop if region=="72"
-*set up factor variables
 
 *region
 encode region, gen(region_n)
@@ -67,10 +64,10 @@ global other ///
 *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------;
 *short-stay
 *run CMC full model	
-eststo shortstay_logit: melogit i2300_uti_cd_readmission $race_dev $race_percentage $other los ///
+eststo shortstay_logit: melogit i2300_uti_cd $race_dev $race_percentage $other ///
 						if short_stay_n==2 || prvdrnum:
 
-esttab shortstay_logit using shortstaylogit_regression.csv, se nogap label	replace
+esttab shortstay_logit using shortstaylogit_regression.csv, se nogap label replace
 
 * CALCULATE PREDICTIVE REPORTING RATES FOR SHORT-STAY RESIDENTS
 foreach black_percent of numlist 1 5{
