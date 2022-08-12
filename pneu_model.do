@@ -7,8 +7,6 @@ cd "`indir'"
 *load analysis dataset
 import delimited using primaryPNEU, clear
 
-*this line of code is only for pneumonia; 72 is porte rico; not occured in other health outcomes
-// drop if region=="72"
 *set up factor variables
 
 *region
@@ -75,7 +73,7 @@ eststo shortstay_logit: melogit i2000_pneumo_cd $race_dev $race_percentage $othe
 esttab shortstay_logit using pneu_shortstaylogit_regression.csv, se nogap label	replace	
 
 *predit reporting probability
-foreach black_percent of numlist 0 1 5{
+foreach black_percent of numlist 1 5{
 	*white resident
 	local black_dev0=-`black_percent'*0.1 
 	*black resident
@@ -89,11 +87,9 @@ foreach black_percent of numlist 0 1 5{
 					black_percent=`pblack' american_indian_percent=0 asian_percent=0 hispanic_percent=0.00 other_percent=0) post
 }
 
-esttab plogit0 plogit1 plogit5 using PNEUshortstay_predictions.csv, replace nostar nogap ci	
+esttab plogit1 plogit5 using PNEUshortstay_predictions.csv, replace nostar nogap ci	
 
 *calculate difference between black and white estimates
-estimates restore plogit0
-lincom _b[1bn._at]-_b[2._at]
 
 estimates restore plogit1
 lincom _b[1bn._at]-_b[2._at]
@@ -115,7 +111,7 @@ esttab longstay_logit using pneu_longstaylogit_regression.csv, se nogap label re
 
 * CALCULATE PREDICTIVE REPORTING RATES FOR LONG-STAY RESIDENTS
 
-foreach black_percent of numlist 0 1 5{
+foreach black_percent of numlist 1 5{
 	*white resident
 	local black_dev0=-`black_percent'*0.1 
 	*black resident
@@ -129,11 +125,9 @@ foreach black_percent of numlist 0 1 5{
 					black_percent=`pblack' american_indian_percent=0 asian_percent=0 hispanic_percent=0.00 other_percent=0) post
 }
 
-esttab pllogit0 pllogit1 pllogit5 using PNEUlongstay_predictions.csv, replace nostar nogap ci	
+esttab pllogit1 pllogit5 using PNEUlongstay_predictions.csv, replace nostar nogap ci	
 
 *calculate difference between black and white estimates
-estimates restore pllogit0
-lincom _b[1bn._at]-_b[2._at]
 
 estimates restore pllogit1
 lincom _b[1bn._at]-_b[2._at]
